@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout updates repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Clone exact source main
         shell: pwsh
