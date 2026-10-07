@@ -13,7 +13,7 @@ permissions:
 jobs:
   prepare:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 20
 
     steps:
       - name: Checkout update repository
@@ -25,170 +25,81 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view v1.0.74 -R "${{ github.repository }}" *> $null
-          if ($LASTEXITCODE -eq 0) {
-            throw "v1.0.74 esiste gia nel repository aggiornamenti."
-          }
+          if ($LASTEXITCODE -eq 0) { throw "v1.0.74 esiste gia." }
           exit 0
 
-      - name: Checkout exact source
+      - name: Download verified 1.0.74 artifact
         shell: pwsh
         run: |
-          git clone https://github.com/newyogurt/coffee-fidelity-stock.git source
-          Set-Location source
-          git checkout 2f8d48afd9550c13c3e817e592f886d7e4b91b27
-          $head = git rev-parse HEAD
-          $originMain = git rev-parse origin/main
-          $version = node -p "require('./package.json').version"
-          if ($head -ne "2f8d48afd9550c13c3e817e592f886d7e4b91b27") { throw "HEAD sorgente inatteso: $head" }
-          if ($originMain -ne "2f8d48afd9550c13c3e817e592f886d7e4b91b27") { throw "origin/main inatteso: $originMain" }
-          if ($version -ne "1.0.74") { throw "Versione sorgente inattesa: $version" }
+          $zip = Join-Path $env:RUNNER_TEMP "release-1.0.74.zip"
+          Invoke-WebRequest -Uri "https://sdmntprpolandcentral.oaiusercontent.com/files/00000000-3cec-820a-820f-f8c15fa99d7e/raw?se=2026-10-07T14%3A01%3A49Z&sp=r&sv=2026-02-06&sr=b&scid=e05e068a-77c0-5415-819e-188041555453&skoid=b5d2651b-fef3-4bb0-a03b-ca59cc22929b&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-10-07T00%3A52%3A50Z&ske=2026-10-08T00%3A52%3A50Z&sks=b&skv=2026-02-06&sig=W47kMkET6MqlaCW4AB5cupeMnROUdiMah9drzUtA/Bk%3D" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "release-files" -Force
+          if (-not (Test-Path "release-files/Coffee-Fidelity-Stock-Setup-1.0.74.exe")) { throw "Installer verificato mancante." }
+          if (-not (Test-Path "release-files/Coffee-Fidelity-Stock-Setup-1.0.74.exe.blockmap")) { throw "Blockmap verificata mancante." }
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: source/package-lock.json
-
-      - name: Install source dependencies
-        working-directory: source
-        run: npm ci
-
-      - name: Recover production publishable key from official 1.0.73
-        shell: pwsh
-        working-directory: source
-        run: |
-          $ErrorActionPreference = "Stop"
-          $installer = Join-Path $env:RUNNER_TEMP "previous-1.0.73.exe"
-          $outer = Join-Path $env:RUNNER_TEMP "previous-outer"
-          $innerRoot = Join-Path $env:RUNNER_TEMP "previous-inner"
-          $asarOut = Join-Path $env:RUNNER_TEMP "previous-asar"
-
-          Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/v1.0.73/Coffee-Fidelity-Stock-Setup-1.0.73.exe" -OutFile $installer
-
-          New-Item -ItemType Directory -Force -Path $outer | Out-Null
-          $sevenZip = node -p "require('7zip-bin').path7za"
-          & $sevenZip x $installer "-o$outer" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "Estrazione installer 1.0.73 fallita." }
-
-          $appAsar = Get-ChildItem -Path $outer -Recurse -Filter "app.asar" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $appAsar) {
-            $archives = Get-ChildItem -Path $outer -Recurse -Filter "*.7z" -File -ErrorAction SilentlyContinue
-            $i = 0
-            foreach ($archive in $archives) {
-              $i += 1
-              $inner = Join-Path $innerRoot $i
-              New-Item -ItemType Directory -Force -Path $inner | Out-Null
-              & $sevenZip x $archive.FullName "-o$inner" -y | Out-Null
-              if ($LASTEXITCODE -ne 0) { continue }
-              $appAsar = Get-ChildItem -Path $inner -Recurse -Filter "app.asar" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($appAsar) { break }
-            }
-          }
-          if (-not $appAsar) { throw "app.asar non trovato nell'installer ufficiale 1.0.73." }
-
-          New-Item -ItemType Directory -Force -Path $asarOut | Out-Null
-          $env:OLD_ASAR = $appAsar.FullName
-          $env:OLD_ASAR_OUT = $asarOut
-
-          @'
-          const fs = require("fs");
-          const path = require("path");
-          const asar = require("@electron/asar");
-          asar.extractAll(process.env.OLD_ASAR, process.env.OLD_ASAR_OUT);
-
-          const allowed = new Set([".js", ".cjs", ".mjs", ".json", ".html"]);
-          const deliveryKeys = new Set();
-          const modern = new Set();
-          const legacy = new Set();
-
-          function files(dir) {
-            const out = [];
-            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-              const full = path.join(dir, entry.name);
-              if (entry.isDirectory()) out.push(...files(full));
-              else if (allowed.has(path.extname(entry.name).toLowerCase())) out.push(full);
-            }
-            return out;
-          }
-
-          const allFiles = files(process.env.OLD_ASAR_OUT);
-          for (const full of allFiles) {
-            let body;
-            try { body = fs.readFileSync(full, "utf8"); } catch { continue; }
-            for (const m of body.matchAll(/deliverySupabasePublishableKey\s*:\s*["']([^"']+)["']/g)) {
-              deliveryKeys.add(m[1]);
-            }
-          }
-
-          for (const full of allFiles) {
-            let body;
-            try { body = fs.readFileSync(full, "utf8"); } catch { continue; }
-            for (const m of body.matchAll(/sb_publishable_[A-Za-z0-9_-]{20,}/g)) {
-              const key = m[0];
-              if (!deliveryKeys.has(key) && !key.includes("compile_only")) modern.add(key);
-            }
-            for (const m of body.matchAll(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g)) {
-              legacy.add(m[0]);
-            }
-          }
-
-          const candidates = modern.size > 0 ? [...modern] : [...legacy];
-          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, "store-key.txt"), candidates.join("\n"), "utf8");
-          console.log("Candidate primary key recuperate: " + candidates.length + " (valori non mostrati).");
-          '@ | node
-
-          $identityPath = Join-Path $asarOut "dist\store-build-identity.json"
-          if (-not (Test-Path $identityPath)) { throw "Identita build precedente non trovata." }
-          $identity = Get-Content $identityPath -Raw | ConvertFrom-Json
-          if ($identity.storeId -ne "caffe-e-delizie") { throw "Store identity precedente inattesa: $($identity.storeId)" }
-          if ($identity.supabaseProjectRef -ne "kktgdntndccxcfnlrlxj") { throw "Project ref precedente inatteso: $($identity.supabaseProjectRef)" }
-
-          $candidates = @(Get-Content (Join-Path $env:RUNNER_TEMP "store-key.txt") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-          if ($candidates.Count -ne 1) { throw "Primary key non identificata in modo univoco. Candidate: $($candidates.Count)." }
-
-          $key = $candidates[0]
-          Write-Host "::add-mask::$key"
-          "STORE_PRODUCTION_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Create exact production environment
-        shell: pwsh
-        working-directory: source
-        run: |
-          @(
-            "VITE_SUPABASE_URL=https://kktgdntndccxcfnlrlxj.supabase.co"
-            "VITE_SUPABASE_PUBLISHABLE_KEY=$env:STORE_PRODUCTION_KEY"
-          ) | Set-Content -Path ".env.store.caffe-e-delizie.local" -Encoding utf8
-
-          npm run store:env:check:caffe
-          if ($LASTEXITCODE -ne 0) { throw "Gate ambiente produzione fallito." }
-
-      - name: Build and upload draft
-        working-directory: source
-        run: npm run desktop:release:win:caffe
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-
-      - name: Verify draft release
+      - name: Build latest.yml using official previous schema
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $release = gh release view v1.0.74 -R "${{ github.repository }}" --json isDraft,assets | ConvertFrom-Json
-          if (-not $release.isDraft) { throw "La release non e draft." }
+          New-Item -ItemType Directory -Force -Path "previous" | Out-Null
+          gh release download v1.0.73 -R "${{ github.repository }}" -p "latest.yml" -D "previous" --clobber
+          $template = Get-Content "previous/latest.yml" -Raw
 
-          $names = @($release.assets | ForEach-Object { $_.name })
+          foreach ($needle in @("version:", "files:", "url:", "sha512:", "size:", "path:", "releaseDate:")) {
+            if (-not $template.Contains($needle)) { throw "Schema latest.yml precedente inatteso: manca $needle" }
+          }
+          if (-not $template.Contains("Coffee-Fidelity-Stock-Setup-1.0.73.exe")) { throw "Schema latest.yml precedente non punta al setup 1.0.73 atteso." }
+
+          $setupPath = (Resolve-Path "release-files/Coffee-Fidelity-Stock-Setup-1.0.74.exe").Path
+          $bytes = [System.IO.File]::ReadAllBytes($setupPath)
+          $hasher = [System.Security.Cryptography.SHA512]::Create()
+          try {
+            $sha64 = [Convert]::ToBase64String($hasher.ComputeHash($bytes))
+          } finally {
+            $hasher.Dispose()
+          }
+          $size = (Get-Item $setupPath).Length
+          $releaseDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+
+          $lines = @(
+            "version: 1.0.74",
+            "files:",
+            "  - url: Coffee-Fidelity-Stock-Setup-1.0.74.exe",
+            "    sha512: $sha64",
+            "    size: $size",
+            "path: Coffee-Fidelity-Stock-Setup-1.0.74.exe",
+            "sha512: $sha64",
+            "releaseDate: '$releaseDate'"
+          )
+          [System.IO.File]::WriteAllText(
+            (Join-Path (Get-Location) "release-files/latest.yml"),
+            ($lines -join [Environment]::NewLine) + [Environment]::NewLine,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+          $check = Get-Content "release-files/latest.yml" -Raw
+          if ($check -notmatch '(?m)^version:\s*1\.0\.74\s*$') { throw "latest.yml 1.0.74 non valido." }
+          if (-not $check.Contains("Coffee-Fidelity-Stock-Setup-1.0.74.exe")) { throw "latest.yml non punta al nuovo setup." }
+
+      - name: Create verified draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v1.0.74 -R "${{ github.repository }}" --title "Caffè e Delizie 1.0.74" --draft "release-files/Coffee-Fidelity-Stock-Setup-1.0.74.exe" "release-files/Coffee-Fidelity-Stock-Setup-1.0.74.exe.blockmap" "release-files/latest.yml"
+          if ($LASTEXITCODE -ne 0) { throw "Creazione draft v1.0.74 fallita." }
+
+      - name: Verify draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $r = gh release view v1.0.74 -R "${{ github.repository }}" --json isDraft,assets | ConvertFrom-Json
+          if (-not $r.isDraft) { throw "v1.0.74 non e draft." }
+          $names = @($r.assets | ForEach-Object { $_.name })
           foreach ($required in @("Coffee-Fidelity-Stock-Setup-1.0.74.exe", "Coffee-Fidelity-Stock-Setup-1.0.74.exe.blockmap", "latest.yml")) {
-            if ($required -notin $names) { throw "Asset mancante: $required" }
+            if ($required -notin $names) { throw "Asset draft mancante: $required" }
           }
-
-          $temp = Join-Path $env:RUNNER_TEMP "latest-check"
-          New-Item -ItemType Directory -Force -Path $temp | Out-Null
-          gh release download v1.0.74 -R "${{ github.repository }}" -p "latest.yml" -D $temp --clobber
-          $latest = Get-Content (Join-Path $temp "latest.yml") -Raw
-          if ($latest -notmatch '(?m)^version:\s*1\.0\.74\s*$') { throw "latest.yml non dichiara 1.0.74." }
-          if ($latest -notmatch [regex]::Escape("Coffee-Fidelity-Stock-Setup-1.0.74.exe")) { throw "latest.yml non punta al setup atteso." }
-
-          gh release edit v1.0.74 -R "${{ github.repository }}" --title "Caffè e Delizie 1.0.74"
+          if (@($r.assets).Count -ne 3) { throw "Numero asset inatteso: $(@($r.assets).Count)" }
           Write-Host "DRAFT_1_0_74_VERIFIED=OK"
